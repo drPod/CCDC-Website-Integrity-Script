@@ -1,0 +1,22 @@
+[Unit]
+Description=Web Integrity Monitor - Defacement Detection
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/web-integrity-monitor --monitor
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=web-integrity-monitor
+User=root
+Group=root
+
+# Security hardening
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/web-integrity
+
+[Install]
+WantedBy=multi-user.target
