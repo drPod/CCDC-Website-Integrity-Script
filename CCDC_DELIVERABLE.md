@@ -14,14 +14,16 @@
 
 ## EXECUTIVE SUMMARY
 
-In response to the increasing threat of website defacement attacks targeting our organization, the Blue Team has developed and deployed an automated file integrity monitoring system. This solution provides real-time detection of unauthorized modifications to critical web server files using SHA-256 cryptographic hashing and syslog alerting.
+In response to the increasing threat of website defacement attacks targeting our organization, the Blue Team has developed and deployed an automated file integrity monitoring system for **both Linux and Windows platforms**. This cross-platform solution provides real-time detection of unauthorized modifications to critical web server files using SHA-256 cryptographic hashing and comprehensive logging/alerting.
 
 **Key Capabilities:**
+- **Cross-Platform Support**: Linux (Ubuntu/Debian) and Windows (Server 2016+)
 - Detects file modifications within 5 minutes
-- Monitors web content, configuration files, and htaccess files
-- Tamper-resistant design with root-only access and immutable attributes
-- Automated scanning via systemd timer or cron
-- Real-time alerting through syslog integration
+- Monitors web content, configuration files, and access control files
+- Tamper-resistant design with administrator-only access
+- Automated scanning via systemd timer (Linux) or Task Scheduler (Windows)
+- Real-time alerting through syslog (Linux) or Windows Event Log (Windows)
+- Ready for SIEM integration on both platforms
 
 ---
 
@@ -39,7 +41,16 @@ Our monitoring system addresses these threats through continuous automated surve
 
 ## SOLUTION ARCHITECTURE
 
-### System Components
+### Dual-Platform Approach
+
+The solution has been developed for both Linux and Windows platforms to protect our entire infrastructure:
+
+| Platform | Implementation | Target Systems |
+|----------|----------------|----------------|
+| **Linux** | Python 3 script | Ubuntu Ecom (Ubuntu 24) |
+| **Windows** | PowerShell 5.1+ script | Web Server 2019 (IIS) |
+
+### System Components (Linux)
 
 1. **Python Monitoring Script** (`web_integrity_monitor.py`)
    - Baseline creation and hash generation
@@ -60,7 +71,30 @@ Our monitoring system addresses these threats through continuous automated surve
    - Systemd journal logging
    - SIEM-ready output format
 
+### System Components (Windows)
+
+1. **PowerShell Monitoring Script** (`Web-IntegrityMonitor.ps1`)
+   - Baseline creation using Get-FileHash
+   - Continuous monitoring and comparison
+   - Windows Event Log integration
+
+2. **Automation Layer**
+   - Task Scheduler (every 5 minutes)
+   - Runs as SYSTEM account
+
+3. **Security Hardening**
+   - Administrators-only NTFS permissions
+   - Protected installation directory
+   - Runs with highest privileges
+
+4. **Logging and Alerting**
+   - Windows Event Log (Application log)
+   - Event Source: WebIntegrityMonitor
+   - Event IDs for different severity levels
+
 ### Monitored Assets
+
+#### Linux (Apache/Nginx)
 
 | Asset Type | Path | Purpose |
 |------------|------|---------|
@@ -71,13 +105,22 @@ Our monitoring system addresses these threats through continuous automated surve
 | Nginx VHosts | `/etc/nginx/sites-*/*` | Nginx virtual hosts |
 | htaccess | `/var/www/**/.htaccess` | Directory access control |
 
+#### Windows (IIS)
+
+| Asset Type | Path | Purpose |
+|------------|------|---------|
+| Web Content | `C:\inetpub\wwwroot` | IIS web content (recursive) |
+| Web.config | `C:\inetpub\*\web.config` | Application configurations |
+| IIS Main Config | `C:\Windows\System32\inetsrv\config\applicationHost.config` | IIS master configuration |
+| IIS Configs | `C:\Windows\System32\inetsrv\config\*.config` | Additional IIS configs |
+
 ---
 
-## TECHNICAL IMPLEMENTATION
+## TECHNICAL IMPLEMENTATION - LINUX
 
-### Script Functional Overview
+### Script Functional Overview (Linux)
 
-The `web_integrity_monitor.py` script operates in two primary modes:
+The `web_integrity_monitor.py` Python script operates in two primary modes:
 
 #### Baseline Mode (`--baseline`)
 1. Scans all files in monitored paths
@@ -384,6 +427,265 @@ def main():
 ```
 
 **Purpose**: Provides command-line interface for baseline creation and monitoring operations. Supports verbose output for manual checks and silent mode for automated execution. Returns appropriate exit codes (0 = no changes, 1 = changes detected) for integration with monitoring systems.
+
+---
+
+## TECHNICAL IMPLEMENTATION - WINDOWS
+
+### Script Functional Overview (Windows)
+
+The `Web-IntegrityMonitor.ps1` PowerShell script operates in two primary modes:
+
+#### Baseline Mode (`-Baseline`)
+1. Scans all files in monitored IIS paths
+2. Calculates SHA-256 hash using Get-FileHash cmdlet
+3. Stores metadata (hash, size, lastWriteTime) in JSON database
+4. Secures baseline file with NTFS Administrators-only permissions
+
+#### Monitor Mode (`-Monitor`)
+1. Loads baseline hash database from JSON
+2. Scans current filesystem state
+3. Compares current hashes against baseline
+4. Detects and logs:
+   - Modified files (hash mismatch)
+   - New files (not in baseline)
+   - Deleted files (in baseline but missing)
+5. Sends alerts to Windows Event Log with Event ID 4000
+
+---
+
+## ANNOTATED WINDOWS POWERSHELL SCRIPT SECTIONS
+
+### Section 1: Parameters and Admin Check
+```powershell
+[CmdletBinding()]
+param(
+    [switch]$Baseline,
+    [switch]$Monitor,
+    [switch]$Verbose,
+    [string]$BaselineFile = "$env:ProgramData\WebIntegrityMonitor\baseline.json"
+)
+
+# Ensure running as Administrator
+if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+    Write-Error "This script must be run as Administrator"
+    exit 1
+}
+```
+
+**Purpose**: Defines command-line parameters and ensures script runs with Administrator privileges. The baseline is stored in a protected ProgramData location accessible only to Administrators and SYSTEM.
+
+---
+
+### Section 2: Event Log Configuration
+```powershell
+$EventLogName = "Application"
+$EventSource = "WebIntegrityMonitor"
+
+# Create event source if it doesn't exist
+if (-not [System.Diagnostics.EventLog]::SourceExists($EventSource)) {
+    New-EventLog -LogName $EventLogName -Source $EventSource
+}
+
+function Write-LogAlert {
+    param([string]$Message)
+    Write-EventLog -LogName $EventLogName -Source $EventSource `
+        -EntryType Error -EventId 4000 -Message "ALERT: $Message"
+}
+```
+
+**Purpose**: Configures Windows Event Log integration. Creates a custom event source "WebIntegrityMonitor" in the Application log. Different severity levels use different Event IDs:
+- **1000**: Information (normal operations)
+- **2000**: Warning (change summaries)
+- **3000**: Error (script errors)
+- **4000**: Alert (file modifications) - Uses Error level for visibility
+
+---
+
+### Section 3: SHA-256 Hash Calculation
+```powershell
+function Get-FileHashSHA256 {
+    param([string]$FilePath)
+
+    try {
+        $hash = Get-FileHash -Path $FilePath -Algorithm SHA256
+        return $hash.Hash
+    } catch {
+        Write-LogError "Error hashing file ${FilePath}: $_"
+        return $null
+    }
+}
+```
+
+**Purpose**: Uses PowerShell's built-in Get-FileHash cmdlet to calculate SHA-256 hashes. Provides the same cryptographic strength as the Linux version, ensuring cross-platform consistency in detection capabilities.
+
+---
+
+### Section 4: File Discovery and Path Expansion
+```powershell
+$MonitoredPaths = @(
+    "C:\inetpub\wwwroot",
+    "C:\inetpub\wwwroot\*\web.config",
+    "C:\Windows\System32\inetsrv\config\applicationHost.config",
+    "C:\Windows\System32\inetsrv\config\*.config"
+)
+
+function Get-MonitoredFiles {
+    $files = @()
+    foreach ($pathPattern in $MonitoredPaths) {
+        if (Test-Path -Path $pathPattern -PathType Container) {
+            $files += Get-ChildItem -Path $pathPattern -File -Recurse
+        } elseif (Test-Path -Path $pathPattern -PathType Leaf) {
+            $files += $pathPattern
+        } else {
+            $files += Get-ChildItem -Path $pathPattern -File
+        }
+    }
+    return $files | Select-Object -Unique
+}
+```
+
+**Purpose**: Defines IIS-specific paths to monitor and expands them to individual files. Handles directories (recursive scan), individual files, and wildcard patterns. Focuses on IIS wwwroot, web.config files, and IIS configuration files commonly targeted in defacement attacks.
+
+---
+
+### Section 5: Baseline Creation
+```powershell
+function New-Baseline {
+    Initialize-BaselineDirectory
+
+    $files = Get-MonitoredFiles
+    $baseline = @{}
+
+    foreach ($file in $files) {
+        $hash = Get-FileHashSHA256 -FilePath $file
+        if ($hash) {
+            $fileInfo = Get-Item -Path $file
+            $baseline[$file] = @{
+                hash = $hash
+                size = $fileInfo.Length
+                lastWriteTime = $fileInfo.LastWriteTime.ToString("o")
+            }
+        }
+    }
+
+    # Save to JSON with metadata
+    $baselineData = @{
+        created = (Get-Date).ToString("o")
+        computerName = $env:COMPUTERNAME
+        files = $baseline
+    }
+
+    $baselineData | ConvertTo-Json -Depth 10 | Out-File -FilePath $BaselineFile
+
+    # Set NTFS permissions - Administrators only
+    $acl = Get-Acl -Path $BaselineFile
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        "BUILTIN\Administrators", "FullControl", "Allow"
+    )))
+    Set-Acl -Path $BaselineFile -AclObject $acl
+}
+```
+
+**Purpose**: Creates the initial baseline by scanning all monitored IIS files and storing their SHA-256 hashes, sizes, and timestamps in a JSON database. Includes computer name for multi-server environments. Secures the baseline file using NTFS ACLs to prevent unauthorized modification.
+
+---
+
+### Section 6: Monitoring and Detection
+```powershell
+function Start-Monitoring {
+    param([bool]$VerboseOutput = $false)
+
+    $baselineData = Get-Content -Path $BaselineFile -Raw | ConvertFrom-Json
+    $baseline = $baselineData.files
+
+    $currentFiles = Get-MonitoredFiles
+    $baselineFiles = $baseline.PSObject.Properties.Name
+
+    $changedFiles = @()
+    $newFiles = @()
+    $deletedFiles = @()
+
+    foreach ($file in $currentFiles) {
+        if ($file -in $baselineFiles) {
+            $currentHash = Get-FileHashSHA256 -FilePath $file
+            if ($currentHash -ne $baseline.$file.hash) {
+                $changedFiles += $file
+                Write-LogAlert "FILE MODIFIED: $file"
+            }
+        } else {
+            $newFiles += $file
+            Write-LogAlert "NEW FILE DETECTED: $file"
+        }
+    }
+
+    foreach ($file in $baselineFiles) {
+        if ($file -notin $currentFiles) {
+            $deletedFiles += $file
+            Write-LogAlert "FILE DELETED: $file"
+        }
+    }
+
+    # Exit with error code if changes detected (for Task Scheduler)
+    if ($changedFiles.Count -gt 0 -or $newFiles.Count -gt 0 -or $deletedFiles.Count -gt 0) {
+        exit 1
+    } else {
+        exit 0
+    }
+}
+```
+
+**Purpose**: Performs integrity checking by comparing current IIS file states against the baseline. Detects three types of changes and logs each to Windows Event Log with Event ID 4000. Returns exit code 1 if any changes detected, enabling Task Scheduler to flag failed runs for administrator review.
+
+---
+
+### Section 7: Windows Installation and Security
+The `Install-WebIntegrityMonitor.ps1` installation script implements security controls:
+
+```powershell
+# Installation to protected directory
+$InstallDir = "C:\Program Files\WebIntegrityMonitor"
+New-Item -Path $InstallDir -ItemType Directory -Force
+
+# Set NTFS ACLs - Administrators and SYSTEM only
+$acl = Get-Acl -Path $InstallDir
+$acl.SetAccessRuleProtection($true, $false)  # Disable inheritance
+
+$adminRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    "BUILTIN\Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"
+)
+$systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    "NT AUTHORITY\SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"
+)
+
+$acl.AddAccessRule($adminRule)
+$acl.AddAccessRule($systemRule)
+Set-Acl -Path $InstallDir -AclObject $acl
+```
+
+**Purpose**: Installs the script to a protected location with strict NTFS permissions. Only Administrators and SYSTEM can access the directory and files. Disables ACL inheritance to prevent permission escalation from parent directories.
+
+---
+
+### Section 8: Task Scheduler Automation
+```powershell
+# Create scheduled task (every 5 minutes)
+$action = New-ScheduledTaskAction -Execute "PowerShell.exe" `
+    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$InstallPath`" -Monitor"
+
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5) `
+    -RepetitionDuration ([TimeSpan]::MaxValue)
+
+$principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" `
+    -LogonType ServiceAccount -RunLevel Highest
+
+Register-ScheduledTask -TaskName "Web Integrity Monitor" `
+    -Action $action -Trigger $trigger -Principal $principal
+```
+
+**Purpose**: Creates a Windows Task Scheduler task that runs every 5 minutes as SYSTEM with highest privileges. Runs in hidden window to avoid user disruption. Uses -ExecutionPolicy Bypass to ensure execution regardless of system policy. Indefinite repetition ensures continuous monitoring.
 
 ---
 
@@ -767,6 +1069,7 @@ sudo web-integrity-monitor --monitor --verbose
 
 ## DEPLOYMENT CHECKLIST
 
+### Linux (Ubuntu Ecom)
 - [ ] Install script to `/usr/local/bin/web-integrity-monitor`
 - [ ] Set ownership to root:root
 - [ ] Set permissions to 700
@@ -779,9 +1082,24 @@ sudo web-integrity-monitor --monitor --verbose
 - [ ] Configure syslog forwarding to SIEM
 - [ ] Test manual execution
 - [ ] Simulate defacement and verify detection
-- [ ] Document baseline update procedures
-- [ ] Train operations team
+
+### Windows (Web Server 2019)
+- [ ] Copy files to Web Server 2019
+- [ ] Run Install-WebIntegrityMonitor.ps1 as Administrator
+- [ ] Verify installation to `C:\Program Files\WebIntegrityMonitor`
+- [ ] Check NTFS permissions (Administrators only)
+- [ ] Verify baseline created in `C:\ProgramData\WebIntegrityMonitor`
+- [ ] Confirm scheduled task created and running
+- [ ] Test manual execution with -Monitor -Verbose
+- [ ] Verify Event Log source created (WebIntegrityMonitor)
+- [ ] Check Event Viewer for alerts
+- [ ] Simulate defacement and verify Event ID 4000 alerts
+
+### General
+- [ ] Document baseline update procedures for both platforms
+- [ ] Train operations team on both Linux and Windows versions
 - [ ] Establish incident response procedures
+- [ ] Configure SIEM to collect alerts from both platforms
 
 ---
 
@@ -823,13 +1141,26 @@ This solution significantly enhances our defensive posture against web defacemen
 
 ## ATTACHMENTS
 
-1. `web_integrity_monitor.py` - Main monitoring script
-2. `install.sh` - Automated installation and hardening
+### Linux Files
+1. `web_integrity_monitor.py` - Main Python monitoring script (Linux)
+2. `install.sh` - Automated installation and hardening (Linux)
 3. `web-integrity-monitor.service` - Systemd service configuration
-4. `web-integrity-monitor.timer` - Systemd timer configuration
+4. `web-integrity-monitor.timer` - Systemd timer configuration (5-minute interval)
 5. `setup-cron.sh` - Alternative cron configuration
-6. `test-installation.sh` - Installation verification script
-7. `README.md` - Complete technical documentation
+6. `test-installation.sh` - Linux installation verification script
+
+### Windows Files
+7. `Web-IntegrityMonitor.ps1` - Main PowerShell monitoring script (Windows)
+8. `Install-WebIntegrityMonitor.ps1` - Automated installation (Windows)
+9. `Setup-ScheduledTask.ps1` - Task Scheduler configuration/management
+10. `Test-Installation.ps1` - Windows installation verification script
+
+### Documentation
+11. `README.md` - Complete technical documentation (Linux)
+12. `DEPLOYMENT.md` - Deployment instructions for both platforms
+13. `DEPLOYMENT_WINDOWS.md` - Detailed Windows deployment guide
+14. `QUICKSTART.md` - Quick deployment reference
+15. `CCDC_DELIVERABLE.md` - This competition deliverable document
 
 ---
 

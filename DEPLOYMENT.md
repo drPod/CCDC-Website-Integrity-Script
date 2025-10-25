@@ -3,9 +3,23 @@
 ## Quick Reference
 
 **Target Systems:**
-- ✅ **Ubuntu Ecom** (Ubuntu 24) - E-commerce web server - **DEPLOY HERE**
+- ✅ **Ubuntu Ecom** (Ubuntu 24) - E-commerce web server - **DEPLOY HERE** (See below)
+- ✅ **Web Server 2019** - Windows IIS server - **DEPLOY HERE** (See DEPLOYMENT_WINDOWS.md)
 - ⚠️ **Ubuntu Wkst** (Ubuntu 24) - Workstation - Optional, only if hosting web services
-- ❌ **Web Server 2019** - Windows server - Not compatible (use Windows-specific solution)
+
+**Both Linux and Windows versions are included in this repository!**
+
+---
+
+## Windows Deployment (Web Server 2019)
+
+**See [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md) for complete Windows instructions.**
+
+**Quick Start for Windows:**
+1. Transfer files to Web Server 2019 (RDP, USB, or network share)
+2. Open PowerShell as Administrator
+3. Run: `.\Install-WebIntegrityMonitor.ps1`
+4. Done! Monitors every 5 minutes, alerts to Windows Event Log
 
 ---
 
